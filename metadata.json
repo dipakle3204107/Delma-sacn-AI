@@ -1,0 +1,8 @@
+{
+  "name": "Skin Guard AI",
+  "description": "A secure, medical-grade skin lesion analysis tool using AI to classify lesions into HAM10000 categories.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
