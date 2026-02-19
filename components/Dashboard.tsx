@@ -2,9 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { User, AnalysisResult, AnalysisHistoryItem } from '../types';
 import { ImageUpload } from './ImageUpload';
 import { ResultCard } from './ResultCard';
+import { Timeline } from './Timeline';
+import { ChatAssistant } from './ChatAssistant';
 import { analyzeSkinLesion } from '../services/geminiService';
 import { historyService } from '../services/historyService';
-import { Microscope, History, ArrowRight, Activity, Calendar, Clock, ChevronRight } from 'lucide-react';
+import { storageService } from '../services/storageService';
+import { reportService } from '../services/reportService';
+import { Microscope, History, ArrowRight, Activity, Calendar, Clock, ChevronRight, Cloud, LayoutGrid, List } from 'lucide-react';
 
 interface DashboardProps {
   user: User;
@@ -12,10 +16,16 @@ interface DashboardProps {
 
 export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [analyzedImagePreview, setAnalyzedImagePreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [restoringHistory, setRestoringHistory] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<AnalysisHistoryItem[]>([]);
+  
+  // New States
+  const [viewMode, setViewMode] = useState<'list' | 'timeline'>('list');
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   useEffect(() => {
     if (user.email) {
@@ -24,7 +34,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
     }
   }, [user.email]);
 
-  // Helper to convert dataURL to File for restoring history
+  // Helper to convert dataURL to File for restoring legacy history
   const dataURLtoFile = (dataurl: string, filename: string): File => {
     const arr = dataurl.split(',');
     const mime = arr[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
@@ -94,18 +104,40 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
     setLoading(true);
     setError(null);
     setResult(null);
+    setAnalyzedImagePreview(null);
 
     try {
-      // Use processImage instead of raw fileToBase64 to handle large files
+      // 1. Process image locally for AI (Base64)
       const base64 = await processImage(selectedImage);
-      const analysis = await analyzeSkinLesion(base64);
+      setAnalyzedImagePreview(base64);
+      
+      // 2. Start AI Analysis
+      const analysisPromise = analyzeSkinLesion(base64);
+
+      // 3. Start Upload to Supabase (Parallel)
+      // Convert base64 to blob for efficient upload
+      const uploadPromise = (async () => {
+         try {
+             const res = await fetch(base64);
+             const blob = await res.blob();
+             return await storageService.uploadLesionImage(blob, user.email);
+         } catch (e) {
+             console.error("Image upload preparation failed", e);
+             return null;
+         }
+      })();
+
+      // Wait for both
+      const [analysis, publicUrl] = await Promise.all([analysisPromise, uploadPromise]);
+      
       setResult(analysis);
 
-      // Save to History
+      // 4. Save to History
+      // Prefer the Cloud URL, fallback to base64 if upload failed (resilience)
       const newHistoryItem: AnalysisHistoryItem = {
         id: Date.now().toString(),
         date: new Date().toISOString(),
-        imageUrl: base64,
+        imageUrl: publicUrl || base64, 
         result: analysis
       };
 
@@ -123,20 +155,60 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
     setSelectedImage(null);
     setResult(null);
     setError(null);
+    setAnalyzedImagePreview(null);
   };
 
-  const handleHistoryClick = (item: AnalysisHistoryItem) => {
-    setResult(item.result);
-    // Restore image file from stored base64
-    const file = dataURLtoFile(item.imageUrl, `history-${item.id}.jpg`);
-    setSelectedImage(file);
+  const handleHistoryClick = async (item: AnalysisHistoryItem) => {
+    setRestoringHistory(true);
     setError(null);
-    // Scroll to top
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setAnalyzedImagePreview(null);
+    
+    try {
+      setResult(item.result);
+      // For visual explanation in ResultCard
+      setAnalyzedImagePreview(item.imageUrl);
+      
+      let file: File;
+
+      if (item.imageUrl.startsWith('http')) {
+        // Handle Cloud URL (Supabase)
+        try {
+          const response = await fetch(item.imageUrl);
+          if (!response.ok) throw new Error("Failed to fetch image");
+          const blob = await response.blob();
+          file = new File([blob], `restored-${item.id}.jpg`, { type: "image/jpeg" });
+        } catch (fetchError) {
+          console.error("Error fetching history image:", fetchError);
+          // Don't block viewing the result, but show warning
+          setError("Could not restore original image for editing. Viewing results only.");
+          setRestoringHistory(false);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          return;
+        }
+      } else {
+        // Handle Legacy Base64
+        file = dataURLtoFile(item.imageUrl, `history-${item.id}.jpg`);
+      }
+
+      setSelectedImage(file);
+      // Scroll to top
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      
+    } catch (e) {
+      setError("Failed to restore history item.");
+    } finally {
+      setRestoringHistory(false);
+    }
+  };
+
+  const handleDownloadReport = () => {
+    if (result) {
+        reportService.generateClinicalReport(result, user, analyzedImagePreview);
+    }
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 relative">
       {/* Welcome Section */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-slate-900">Patient Examination Dashboard</h1>
@@ -168,15 +240,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
 
             <button
               onClick={handleAnalyze}
-              disabled={!selectedImage || loading}
+              disabled={!selectedImage || loading || restoringHistory}
               className={`mt-6 w-full flex items-center justify-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-medium text-white transition-all
-                ${!selectedImage || loading 
+                ${!selectedImage || loading || restoringHistory
                   ? 'bg-slate-300 cursor-not-allowed' 
                   : 'bg-medical-600 hover:bg-medical-700 hover:shadow-md'
                 }`}
             >
-              {loading ? 'Processing Image...' : 'Run Diagnostics'}
-              {!loading && <ArrowRight className="ml-2 w-4 h-4" />}
+              {loading ? 'Processing Image...' : restoringHistory ? 'Restoring...' : 'Run Diagnostics'}
+              {!loading && !restoringHistory && <ArrowRight className="ml-2 w-4 h-4" />}
             </button>
           </div>
 
@@ -185,66 +257,87 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
              <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
                <h3 className="font-semibold text-slate-900 flex items-center gap-2">
                  <History className="w-4 h-4 text-medical-600" />
-                 Recent Scans
+                 Patient History
                </h3>
-               <span className="text-xs text-slate-500">{history.length} Saved</span>
+               
+               <div className="flex bg-slate-100 rounded-lg p-1">
+                 <button 
+                   onClick={() => setViewMode('list')}
+                   className={`p-1 rounded ${viewMode === 'list' ? 'bg-white shadow text-slate-800' : 'text-slate-400 hover:text-slate-600'}`}
+                 >
+                   <List className="w-4 h-4" />
+                 </button>
+                 <button 
+                   onClick={() => setViewMode('timeline')}
+                   className={`p-1 rounded ${viewMode === 'timeline' ? 'bg-white shadow text-slate-800' : 'text-slate-400 hover:text-slate-600'}`}
+                 >
+                   <LayoutGrid className="w-4 h-4" />
+                 </button>
+               </div>
              </div>
              
-             <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
-               {history.length === 0 ? (
-                 <div className="p-8 text-center text-slate-400 text-sm">
-                   <Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                   No recent history found
-                 </div>
+             <div className="max-h-96 overflow-y-auto">
+               {viewMode === 'timeline' ? (
+                 <Timeline history={history} onSelect={handleHistoryClick} />
                ) : (
-                 history.map((item) => (
-                   <button 
-                     key={item.id}
-                     onClick={() => handleHistoryClick(item)}
-                     className="w-full p-4 hover:bg-slate-50 transition-colors flex items-center gap-4 text-left group"
-                   >
-                     <div className="w-12 h-12 rounded-lg bg-slate-100 overflow-hidden flex-shrink-0 border border-slate-200">
-                       <img src={item.imageUrl} alt="scan" className="w-full h-full object-cover" />
-                     </div>
-                     <div className="flex-1 min-w-0">
-                       <p className="text-sm font-medium text-slate-900 truncate">
-                         {item.result.category}
-                       </p>
-                       <div className="flex items-center gap-2 mt-1">
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
-                            item.result.severity === 'high' ? 'bg-red-50 text-red-700 border-red-100' :
-                            item.result.severity === 'medium' ? 'bg-orange-50 text-orange-700 border-orange-100' :
-                            'bg-green-50 text-green-700 border-green-100'
-                          }`}>
-                            {item.result.confidence}% Conf.
-                          </span>
-                          <span className="text-xs text-slate-400 flex items-center gap-1">
-                            {new Date(item.date).toLocaleDateString()}
-                          </span>
-                       </div>
-                     </div>
-                     <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-medical-500 transition-colors" />
-                   </button>
-                 ))
+                  <div className="divide-y divide-slate-100">
+                    {history.length === 0 ? (
+                      <div className="p-8 text-center text-slate-400 text-sm">
+                        <Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                        No recent history found
+                      </div>
+                    ) : (
+                      history.map((item) => (
+                        <button 
+                          key={item.id}
+                          onClick={() => handleHistoryClick(item)}
+                          className="w-full p-4 hover:bg-slate-50 transition-colors flex items-center gap-4 text-left group"
+                        >
+                          <div className="w-12 h-12 rounded-lg bg-slate-100 overflow-hidden flex-shrink-0 border border-slate-200 relative">
+                            <img src={item.imageUrl} alt="scan" className="w-full h-full object-cover" />
+                            {item.imageUrl.startsWith('http') && (
+                              <div className="absolute bottom-0 right-0 p-0.5 bg-black/50 rounded-tl">
+                                  <Cloud className="w-2 h-2 text-white" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-slate-900 truncate">
+                              {item.result.category}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1">
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                                  item.result.severity === 'high' ? 'bg-red-50 text-red-700 border-red-100' :
+                                  item.result.severity === 'medium' ? 'bg-orange-50 text-orange-700 border-orange-100' :
+                                  'bg-green-50 text-green-700 border-green-100'
+                                }`}>
+                                  {item.result.confidence}% Conf.
+                                </span>
+                                <span className="text-xs text-slate-400 flex items-center gap-1">
+                                  {new Date(item.date).toLocaleDateString()}
+                                </span>
+                            </div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-medical-500 transition-colors" />
+                        </button>
+                      ))
+                    )}
+                  </div>
                )}
              </div>
-          </div>
-
-          <div className="bg-indigo-50 p-6 rounded-2xl border border-indigo-100">
-            <h3 className="text-indigo-900 font-semibold mb-2 text-sm">Best Practices</h3>
-            <ul className="text-xs text-indigo-700 space-y-2 list-disc pl-4">
-              <li>Ensure consistent lighting without glare.</li>
-              <li>Center the lesion in the frame.</li>
-              <li>Include a reference scale if possible.</li>
-              <li>Avoid blurry or out-of-focus images.</li>
-            </ul>
           </div>
         </div>
 
         {/* Right Column: Results */}
         <div className="lg:col-span-7">
           {result || loading ? (
-            <ResultCard result={result!} loading={loading} />
+            <ResultCard 
+              result={result!} 
+              loading={loading} 
+              imageUrl={analyzedImagePreview}
+              onDownloadReport={result ? handleDownloadReport : undefined}
+              onOpenChat={() => setIsChatOpen(true)}
+            />
           ) : (
             <div className="h-full min-h-[400px] flex flex-col items-center justify-center bg-slate-50 rounded-2xl border border-dashed border-slate-300 text-slate-400 p-8 text-center">
               <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-sm mb-4">
@@ -258,6 +351,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
           )}
         </div>
       </div>
+      
+      {/* AI Chat Assistant (Floating) */}
+      <ChatAssistant 
+        isOpen={isChatOpen} 
+        onClose={() => setIsChatOpen(false)} 
+        contextResult={result}
+      />
     </div>
   );
 };

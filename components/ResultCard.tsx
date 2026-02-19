@@ -1,17 +1,21 @@
 import React, { useState } from 'react';
 import { AnalysisResult } from '../types';
-import { AlertTriangle, CheckCircle, Info, Activity, BarChart2, MapPin, Phone, Navigation, Loader2, Star, Clock, ExternalLink, Youtube, Search, BookOpen } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Info, Activity, BarChart2, MapPin, Phone, Navigation, Loader2, Star, Clock, ExternalLink, Youtube, Search, BookOpen, Eye, Zap, ShieldAlert, BadgeCheck, FileText, MessageCircle } from 'lucide-react';
 import { findNearbyClinics, ClinicResult } from '../services/geminiService';
 
 interface ResultCardProps {
   result: AnalysisResult;
   loading: boolean;
+  imageUrl?: string | null;
+  onDownloadReport?: () => void;
+  onOpenChat?: () => void;
 }
 
-export const ResultCard: React.FC<ResultCardProps> = ({ result, loading }) => {
+export const ResultCard: React.FC<ResultCardProps> = ({ result, loading, imageUrl, onDownloadReport, onOpenChat }) => {
   const [findingLocation, setFindingLocation] = useState(false);
   const [clinicData, setClinicData] = useState<ClinicResult | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [showHeatmap, setShowHeatmap] = useState(false);
 
   const handleFindClinics = () => {
     setFindingLocation(true);
@@ -53,11 +57,40 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, loading }) => {
         </div>
         <h3 className="mt-6 text-lg font-medium text-slate-900">Analyzing Lesion Structure</h3>
         <p className="mt-2 text-sm text-slate-500 text-center max-w-xs">
-          Running HAM10000 classification model features extraction...
+          Running HAM10000 classification model features extraction & XAI heatmap generation...
         </p>
       </div>
     );
   }
+
+  // --- Confidence Calibration Logic ---
+  const getCalibrationLevel = (score: number) => {
+    if (score >= 85) return { 
+      label: 'High Certainty', 
+      color: 'text-green-700 bg-green-50 border-green-200', 
+      barColor: 'bg-green-500',
+      icon: <BadgeCheck className="w-4 h-4" />,
+      desc: 'Model is highly confident.' 
+    };
+    if (score >= 60) return { 
+      label: 'Moderate Certainty', 
+      color: 'text-blue-700 bg-blue-50 border-blue-200', 
+      barColor: 'bg-blue-500',
+      icon: <CheckCircle className="w-4 h-4" />,
+      desc: 'Standard confidence range.'
+    };
+    return { 
+      label: 'Uncertain', 
+      color: 'text-red-700 bg-red-50 border-red-200', 
+      barColor: 'bg-red-500',
+      icon: <ShieldAlert className="w-4 h-4" />,
+      desc: 'Get medical review.' 
+    };
+  };
+
+  const calibration = getCalibrationLevel(result.confidence);
+  const isUncertain = result.confidence < 60;
+
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -87,9 +120,25 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, loading }) => {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-full">
-      <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-slate-900">Clinical Prediction Results</h3>
-        <span className="text-xs font-mono text-slate-400">ID: {Math.random().toString(36).substr(2, 9).toUpperCase()}</span>
+      <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex flex-wrap gap-4 justify-between items-center">
+        <div>
+          <h3 className="text-lg font-semibold text-slate-900">Clinical Prediction Results</h3>
+          <span className="text-xs font-mono text-slate-400">ID: {Math.random().toString(36).substr(2, 9).toUpperCase()}</span>
+        </div>
+        
+        {/* Action Buttons */}
+        <div className="flex gap-2">
+           {onOpenChat && (
+             <button onClick={onOpenChat} className="p-2 text-slate-500 hover:text-medical-600 hover:bg-white rounded-full transition-all" title="Ask AI Assistant">
+               <MessageCircle className="w-5 h-5" />
+             </button>
+           )}
+           {onDownloadReport && (
+             <button onClick={onDownloadReport} className="p-2 text-slate-500 hover:text-medical-600 hover:bg-white rounded-full transition-all" title="Download PDF Report">
+               <FileText className="w-5 h-5" />
+             </button>
+           )}
+        </div>
       </div>
 
       <div className="p-6 space-y-8 flex-grow overflow-y-auto">
@@ -148,6 +197,100 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, loading }) => {
           </div>
         </div>
 
+        {/* AI Confidence Calibration Bar */}
+        <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+           <div className="flex justify-between items-center mb-2">
+             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+               <Activity className="w-4 h-4 text-medical-600" />
+               AI Confidence Calibration
+             </h4>
+             <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium border ${calibration.color}`}>
+               {calibration.icon}
+               {calibration.label}
+             </div>
+           </div>
+           
+           <div className="relative h-2.5 w-full bg-slate-200 rounded-full overflow-hidden mb-2">
+              {/* Gradient background for context */}
+              <div className="absolute inset-0 bg-gradient-to-r from-red-200 via-blue-200 to-green-200 opacity-30"></div>
+              {/* Actual value bar */}
+              <div 
+                className={`absolute top-0 left-0 h-full rounded-full transition-all duration-1000 ${calibration.barColor}`} 
+                style={{ width: `${result.confidence}%` }}
+              ></div>
+           </div>
+           
+           <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+              <span>0% (Uncertain)</span>
+              <span>100% (Certain)</span>
+           </div>
+
+           {isUncertain && (
+             <div className="mt-3 flex items-start gap-2 text-xs text-red-700 bg-red-50 p-2 rounded border border-red-100">
+                <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <p>
+                  <strong>Uncertain — Get Medical Review.</strong> The model certainty level is low ({result.confidence}%). This result should be treated with caution.
+                </p>
+             </div>
+           )}
+        </div>
+
+        {/* XAI: Explainable AI Heatmap Section */}
+        {imageUrl && result.heatmap && (
+          <div className="bg-slate-900 rounded-xl overflow-hidden relative shadow-md">
+            <div className="absolute top-0 left-0 right-0 p-3 bg-gradient-to-b from-black/80 to-transparent z-10 flex justify-between items-start">
+               <div>
+                 <h4 className="text-white font-semibold text-sm flex items-center gap-2">
+                   <Zap className="w-4 h-4 text-yellow-400" />
+                   AI Attention Map
+                 </h4>
+                 <p className="text-slate-300 text-[10px]">Visualizing features influencing diagnosis</p>
+               </div>
+               
+               <button 
+                 onClick={() => setShowHeatmap(!showHeatmap)}
+                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                   showHeatmap 
+                   ? 'bg-yellow-400 text-slate-900' 
+                   : 'bg-white/20 text-white hover:bg-white/30'
+                 }`}
+               >
+                 <Eye className="w-3.5 h-3.5" />
+                 {showHeatmap ? 'Hide Heatmap' : 'Show Heatmap'}
+               </button>
+            </div>
+
+            <div className="relative w-full h-64 bg-black flex items-center justify-center">
+               <img 
+                 src={imageUrl} 
+                 alt="Analyzed Lesion" 
+                 className="h-full w-full object-contain" 
+               />
+               
+               {/* Gradient Overlay */}
+               {showHeatmap && (
+                 <div 
+                   className="absolute pointer-events-none animate-in fade-in duration-500"
+                   style={{
+                     left: `${result.heatmap.x}%`,
+                     top: `${result.heatmap.y}%`,
+                     width: `${result.heatmap.radius * 2}%`,
+                     height: `${result.heatmap.radius * 2}%`,
+                     transform: 'translate(-50%, -50%)',
+                     background: 'radial-gradient(circle closest-side, rgba(255, 60, 0, 0.7) 0%, rgba(255, 160, 0, 0.4) 40%, rgba(255, 255, 0, 0.2) 60%, transparent 100%)',
+                     boxShadow: '0 0 20px 5px rgba(255,0,0,0.1)'
+                   }}
+                 />
+               )}
+            </div>
+            
+            <div className="bg-slate-800 px-4 py-2 flex items-center justify-between text-xs text-slate-400">
+               <span>Focus: {result.description.split('.')[0].substring(0, 40)}...</span>
+               <span>X:{result.heatmap.x}% Y:{result.heatmap.y}%</span>
+            </div>
+          </div>
+        )}
+
         {/* Probability Distribution Graph */}
         {result.probabilities && (
           <div className="bg-slate-50 rounded-xl p-5 border border-slate-100">
@@ -157,7 +300,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, loading }) => {
             </h4>
             <div className="space-y-3">
               {Object.entries(result.probabilities)
-                .sort(([,a], [,b]) => b - a)
+                .sort(([,a], [,b]) => (b as number) - (a as number))
                 .slice(0, 4) // Show top 4
                 .map(([name, score]) => (
                   <div key={name}>
@@ -190,12 +333,12 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, loading }) => {
             </h4>
             <p className="text-sm text-slate-600 leading-relaxed">{result.description}</p>
           </div>
-          <div className={`p-4 rounded-xl border ${result.severity === 'high' ? 'bg-red-50/50 border-red-100' : 'bg-blue-50/50 border-blue-100'}`}>
-            <h4 className={`font-semibold mb-2 flex items-center gap-2 text-sm ${result.severity === 'high' ? 'text-red-900' : 'text-blue-900'}`}>
+          <div className={`p-4 rounded-xl border ${result.severity === 'high' ? 'bg-red-50/50 border-red-100' : isUncertain ? 'bg-yellow-50/50 border-yellow-100' : 'bg-blue-50/50 border-blue-100'}`}>
+            <h4 className={`font-semibold mb-2 flex items-center gap-2 text-sm ${result.severity === 'high' ? 'text-red-900' : isUncertain ? 'text-yellow-900' : 'text-blue-900'}`}>
               <Activity className="w-4 h-4" /> 
               Recommendation
             </h4>
-            <p className={`text-sm leading-relaxed ${result.severity === 'high' ? 'text-red-800' : 'text-blue-800'}`}>
+            <p className={`text-sm leading-relaxed ${result.severity === 'high' ? 'text-red-800' : isUncertain ? 'text-yellow-800' : 'text-blue-800'}`}>
               {result.recommendation}
             </p>
           </div>

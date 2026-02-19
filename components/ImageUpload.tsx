@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useRef, useEffect } from 'react';
-import { Upload, X, Image as ImageIcon, Camera, SwitchCamera } from 'lucide-react';
+import { Upload, X, Image as ImageIcon, Camera, SwitchCamera, Sun, CheckCircle, AlertCircle } from 'lucide-react';
 
 interface ImageUploadProps {
   onImageSelect: (file: File) => void;
@@ -10,8 +10,11 @@ interface ImageUploadProps {
 export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selectedImage, onClear }) => {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [lightingStatus, setLightingStatus] = useState<'good' | 'dark' | 'bright' | 'checking'>('checking');
+  
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const lightingCheckInterval = useRef<number | null>(null);
 
   useEffect(() => {
     // Cleanup stream on unmount
@@ -64,7 +67,46 @@ export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selecte
     onClear();
   };
 
-  // Camera Functions
+  // --- AR & Camera Logic ---
+
+  const checkLighting = () => {
+    if (!videoRef.current) return;
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = 100; // Small sample size
+    canvas.height = 100;
+    const ctx = canvas.getContext('2d');
+    
+    if (ctx) {
+      // Draw center crop of video
+      const vid = videoRef.current;
+      ctx.drawImage(vid, vid.videoWidth/2 - 50, vid.videoHeight/2 - 50, 100, 100, 0, 0, 100, 100);
+      
+      const frame = ctx.getImageData(0, 0, 100, 100);
+      const data = frame.data;
+      let r, g, b, avg;
+      let colorSum = 0;
+
+      for (let x = 0, len = data.length; x < len; x += 4) {
+        r = data[x];
+        g = data[x + 1];
+        b = data[x + 2];
+        avg = Math.floor((r + g + b) / 3);
+        colorSum += avg;
+      }
+
+      const brightness = Math.floor(colorSum / (100 * 100));
+      
+      if (brightness < 60) {
+        setLightingStatus('dark');
+      } else if (brightness > 220) {
+        setLightingStatus('bright');
+      } else {
+        setLightingStatus('good');
+      }
+    }
+  };
+
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -75,6 +117,10 @@ export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selecte
         videoRef.current.srcObject = stream;
       }
       setIsCameraOpen(true);
+      
+      // Start AR analysis loop
+      lightingCheckInterval.current = window.setInterval(checkLighting, 500);
+
     } catch (err) {
       console.error("Error accessing camera:", err);
       alert("Could not access camera. Please ensure permissions are granted and no other app is using it.");
@@ -88,6 +134,10 @@ export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selecte
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
+    }
+    if (lightingCheckInterval.current) {
+      clearInterval(lightingCheckInterval.current);
+      lightingCheckInterval.current = null;
     }
     setIsCameraOpen(false);
   };
@@ -113,13 +163,53 @@ export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selecte
 
   if (isCameraOpen) {
     return (
-      <div className="w-full h-80 bg-black rounded-xl overflow-hidden relative flex flex-col items-center justify-center">
+      <div className="w-full h-96 bg-black rounded-xl overflow-hidden relative flex flex-col items-center justify-center">
         <video 
           ref={videoRef} 
           autoPlay 
           playsInline 
           className="w-full h-full object-cover"
         />
+        
+        {/* AR Overlay Guide */}
+        <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+           {/* Center Target Circle */}
+           <div className={`w-64 h-64 border-2 rounded-full flex items-center justify-center transition-colors duration-300 ${
+             lightingStatus === 'good' ? 'border-green-400 bg-green-400/10' : 'border-white/50 border-dashed'
+           }`}>
+              <div className="w-4 h-4 bg-white/50 rounded-full"></div>
+           </div>
+           
+           {/* Guidelines */}
+           <div className="absolute top-1/2 left-4 right-4 h-0 border-t border-white/20"></div>
+           <div className="absolute left-1/2 top-4 bottom-4 w-0 border-l border-white/20"></div>
+        </div>
+
+        {/* Lighting Indicator */}
+        <div className="absolute top-4 left-0 right-0 flex justify-center z-10">
+           <div className={`px-4 py-2 rounded-full backdrop-blur-md flex items-center gap-2 text-sm font-medium transition-colors duration-300 ${
+              lightingStatus === 'good' ? 'bg-green-500/80 text-white' : 
+              lightingStatus === 'dark' ? 'bg-yellow-500/80 text-white' :
+              lightingStatus === 'bright' ? 'bg-orange-500/80 text-white' :
+              'bg-black/50 text-white'
+           }`}>
+              {lightingStatus === 'good' && <CheckCircle className="w-4 h-4" />}
+              {lightingStatus === 'dark' && <Sun className="w-4 h-4" />}
+              {lightingStatus === 'bright' && <Sun className="w-4 h-4" />}
+              
+              <span>
+                {lightingStatus === 'good' ? 'Perfect Lighting' : 
+                 lightingStatus === 'dark' ? 'Too Dark - Add Light' : 
+                 lightingStatus === 'bright' ? 'Too Bright - Reduce Glare' : 'Checking...'}
+              </span>
+           </div>
+        </div>
+
+        {/* Instruction Text */}
+        <div className="absolute top-16 text-white/80 text-xs bg-black/40 px-3 py-1 rounded-full backdrop-blur-sm">
+           Keep lesion inside the circle at 10cm distance
+        </div>
+
         <div className="absolute bottom-6 flex items-center gap-6 z-10">
            <button 
              onClick={stopCamera}
@@ -129,14 +219,12 @@ export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selecte
            </button>
            <button 
              onClick={capturePhoto}
-             className="p-1 rounded-full border-4 border-white/50"
+             disabled={lightingStatus === 'checking'}
+             className={`p-1 rounded-full border-4 transition-all ${lightingStatus === 'good' ? 'border-green-400' : 'border-white/50'}`}
            >
              <div className="w-14 h-14 bg-white rounded-full hover:scale-95 transition-transform"></div>
            </button>
            <div className="w-12"></div> {/* Spacer for balance */}
-        </div>
-        <div className="absolute top-4 right-4 px-3 py-1 bg-black/50 text-white text-xs rounded-full backdrop-blur-sm">
-           Live Mode
         </div>
       </div>
     );
@@ -170,7 +258,7 @@ export const ImageUpload: React.FC<ImageUploadProps> = ({ onImageSelect, selecte
                     className="flex items-center justify-center px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors shadow-sm"
                   >
                     <Camera className="w-4 h-4 mr-2" />
-                    Use Camera
+                    AR Camera
                   </button>
                </div>
              </div>

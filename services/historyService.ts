@@ -19,16 +19,16 @@ export const historyService = {
       // Prepend new item
       const updatedHistory = [item, ...currentHistory];
       
-      // Limit to last 5 items to avoid LocalStorage Quota issues with base64 images
-      // In a real app, images would be stored in a cloud bucket (AWS S3 / Firebase Storage)
-      const trimmedHistory = updatedHistory.slice(0, 5);
+      // Limit to last 50 items. 
+      // Since we primarily use Supabase URLs now, the size footprint is small.
+      const trimmedHistory = updatedHistory.slice(0, 50);
       
       localStorage.setItem(HISTORY_KEY_PREFIX + userEmail, JSON.stringify(trimmedHistory));
       return trimmedHistory;
     } catch (e) {
-      console.warn("Failed to save history (likely quota exceeded). Clearing old history to make space.");
-       // Fallback: Try to save just the new item if quota is full
-       try {
+      console.warn("Failed to save history. Quota exceeded?", e);
+      // Fallback: Try to save just the new item if quota is full
+      try {
            const singleItemHistory = [item];
            localStorage.setItem(HISTORY_KEY_PREFIX + userEmail, JSON.stringify(singleItemHistory));
            return singleItemHistory;

@@ -21,6 +21,11 @@ export interface AnalysisResult {
   description: string;
   recommendation: string;
   severity: 'low' | 'medium' | 'high';
+  heatmap?: {
+    x: number; // 0-100 percentage (center x)
+    y: number; // 0-100 percentage (center y)
+    radius: number; // 0-100 percentage (size of attention)
+  };
 }
 
 export interface AnalysisHistoryItem {

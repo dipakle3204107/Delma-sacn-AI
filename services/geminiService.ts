@@ -12,7 +12,7 @@ You are an expert dermatologist and oncologist AI assistant.
 Your task is to analyze the provided image of a skin lesion and classify it into one of the 7 categories defined in the HAM10000 dataset.
 
 The 7 Categories are:
-1. Actinic keratoses and intraepithelial carcinoma / Bowen's disease (akiec)
+1. Actinic keratoses (akiec)
 2. Basal cell carcinoma (bcc)
 3. Benign keratosis-like lesions (bkl)
 4. Dermatofibroma (df)
@@ -22,21 +22,34 @@ The 7 Categories are:
 
 If the image is NOT a skin lesion, classify it as "Unknown".
 
-Analyze the visual features (asymmetry, border, color, diameter, evolution) and provide the output in the following JSON format:
+Analyze the visual features (asymmetry, border, color, diameter, evolution) and provide the output in the following JSON format.
+CRITICAL: The "confidence" field MUST match the value of the highest category in "probabilities".
+
+EXPLAINABLE AI (XAI) INSTRUCTIONS:
+Identify the specific region of the image that contributes most to this diagnosis (e.g., irregular border, specific discoloration area, or the lesion center).
+Return "heatmap_coords" with x, y (0-100 percentages from top-left) and radius (0-100 percentage of image width) to highlight the lesion area.
 
 {
-  "category": "One of: Actinic keratoses, Basal cell carcinoma, Benign keratosis-like lesions, Dermatofibroma, Melanoma, Melanocytic nevi, Vascular lesions, Unknown / Non-skin",
+  "category": "The exact name of the category with the highest probability",
   "confidence": number (0-100),
   "probabilities": {
-    "Melanoma": number,
-    "Nevi": number,
-    "Benign Keratosis": number,
-    "Basal Cell Carcinoma": number
-    // Include top 4 most likely classes with their percentages (sum doesn't need to be 100, just relative confidence)
+    "Melanoma": number (0-100),
+    "Nevi": number (0-100),
+    "Benign Keratosis": number (0-100),
+    "Basal Cell Carcinoma": number (0-100),
+    "Actinic keratoses": number (0-100),
+    "Dermatofibroma": number (0-100),
+    "Vascular lesions": number (0-100)
+    // You MUST include probability scores for all relevant classes.
   },
   "description": "string (brief description of visual features)",
   "recommendation": "string",
-  "severity": "one of: low, medium, high"
+  "severity": "one of: low, medium, high",
+  "heatmap_coords": {
+    "x": number,
+    "y": number,
+    "radius": number
+  }
 }
 
 Return ONLY valid JSON. Do not include markdown code blocks.
@@ -53,6 +66,75 @@ const getImageHash = (str: string): number => {
     hash = hash & hash; // Convert to 32bit integer
   }
   return Math.abs(hash);
+};
+
+// Helper function to ensure data consistency
+const normalizeAnalysisResult = (rawResult: any): AnalysisResult => {
+  // 1. Sanitize Probabilities
+  let probs: Record<string, number> = {};
+  
+  if (rawResult.probabilities) {
+    // Normalize values to numbers (handle strings like "80%")
+    for (const [key, val] of Object.entries(rawResult.probabilities)) {
+      let numVal = 0;
+      if (typeof val === 'string') {
+        numVal = parseFloat((val as string).replace('%', ''));
+      } else if (typeof val === 'number') {
+        numVal = val;
+      }
+      
+      // Normalize 0-1 scale to 0-100
+      if (numVal > 0 && numVal <= 1) {
+        numVal = numVal * 100;
+      }
+      
+      probs[key] = Math.round(numVal * 10) / 10; // Round to 1 decimal place
+    }
+  } else {
+    // Fallback if model didn't return probabilities
+    probs = { [rawResult.category]: rawResult.confidence };
+  }
+
+  // 2. Find the mathematical winner
+  let maxScore = -1;
+  let winnerCategory = rawResult.category;
+
+  // We loop through probabilities to find the actual highest number
+  for (const [cat, score] of Object.entries(probs)) {
+    if (score > maxScore) {
+      maxScore = score;
+      winnerCategory = cat;
+    }
+  }
+
+  // 3. Force Consistency
+  const finalCategory = winnerCategory;
+  const finalConfidence = maxScore > 0 ? maxScore : (rawResult.confidence || 0);
+
+  // 4. AI Confidence Calibration Safety Check
+  // If confidence is below 60%, the model is uncertain. We explicitly flag this.
+  let finalRecommendation = rawResult.recommendation || "Consult a dermatologist.";
+  let finalSeverity = rawResult.severity || "low";
+
+  if (finalConfidence < 60) {
+    finalRecommendation = "UNCERTAIN RESULT — GET MEDICAL REVIEW. The AI confidence is low. This may be due to image quality, lighting, or complex lesion features. Clinical dermatoscopy is mandatory.";
+    // We don't necessarily set severity to high, but we treat it seriously.
+    // However, if the prediction was Benign but low confidence, we keep it as is but warn.
+  }
+
+  return {
+    category: finalCategory as HAM10000Class, // Cast to enum
+    confidence: finalConfidence,
+    probabilities: probs,
+    description: rawResult.description || "Analysis complete.",
+    recommendation: finalRecommendation,
+    severity: finalSeverity,
+    heatmap: rawResult.heatmap_coords ? {
+      x: rawResult.heatmap_coords.x,
+      y: rawResult.heatmap_coords.y,
+      radius: rawResult.heatmap_coords.radius || 30
+    } : { x: 50, y: 50, radius: 30 } // Default center if model fails to coordinate
+  };
 };
 
 export const analyzeSkinLesion = async (base64Image: string): Promise<AnalysisResult> => {
@@ -96,12 +178,83 @@ export const analyzeSkinLesion = async (base64Image: string): Promise<AnalysisRe
     // Clean potential markdown code blocks (```json ... ```)
     const cleanedText = resultText.replace(/```json\n?|\n?```/g, '').trim();
 
-    const analysis = JSON.parse(cleanedText) as AnalysisResult;
-    return analysis;
+    let rawAnalysis;
+    try {
+      rawAnalysis = JSON.parse(cleanedText);
+    } catch (e) {
+      console.error("Failed to parse AI response", e);
+      throw new Error("Invalid response format from AI");
+    }
+
+    // Apply strict normalization to ensure Probability Distribution matches Confidence
+    const consistentAnalysis = normalizeAnalysisResult(rawAnalysis);
+    
+    return consistentAnalysis;
 
   } catch (error) {
     console.error("AI Analysis Error:", error);
     throw new Error("Failed to analyze image. Please try again.");
+  }
+};
+
+// --- Chat Service ---
+export interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
+}
+
+export const chatWithHealthAssistant = async (
+  currentMessage: string, 
+  history: ChatMessage[], 
+  contextResult?: AnalysisResult
+): Promise<string> => {
+  try {
+    if (!process.env.API_KEY) {
+      throw new Error("API Key not found.");
+    }
+
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    
+    // Construct system context
+    let systemPrompt = `You are "DermaBot", a helpful, empathetic medical AI assistant specialized in dermatology.
+    Your goal is to explain skin cancer concepts, the ABCDE rule, and general skin health in simple, reassuring language.
+    
+    IMPORTANT SAFETY RULES:
+    1. NEVER provide a definitive new diagnosis.
+    2. ALWAYS recommend consulting a real doctor for medical advice.
+    3. Keep answers concise (under 100 words) unless asked for details.
+    `;
+
+    if (contextResult) {
+      systemPrompt += `
+      
+      CONTEXT: The user has just performed a scan with the following result:
+      - Diagnosis: ${contextResult.category}
+      - Confidence: ${contextResult.confidence}%
+      - Severity: ${contextResult.severity}
+      - Notes: ${contextResult.description}
+      
+      Use this context to answer questions about the specific result, but remind them it is an AI screening tool, not a biopsy.
+      `;
+    }
+
+    const chat = ai.chats.create({
+      model: 'gemini-3-flash-preview', // Good for conversational text
+      config: {
+        systemInstruction: systemPrompt,
+      },
+      history: history.map(h => ({
+        role: h.role,
+        parts: [{ text: h.text }]
+      }))
+    });
+
+    const result = await chat.sendMessage({ message: currentMessage });
+    return result.text;
+
+  } catch (error) {
+    console.error("Chat Error:", error);
+    return "I'm having trouble connecting right now. Please try again later.";
   }
 };
 
